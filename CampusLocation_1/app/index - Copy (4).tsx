@@ -8,14 +8,8 @@ import { useRouter, useFocusEffect } from 'expo-router';
 import { getAllReminders, deleteReminder, markReminderComplete, markReminderIncomplete } from '../utils/storage';
 import { getAllLocationPins } from '../utils/locations';
 
-// Place these outside the component so they persist
+// Place this outside the component so it persists
 const lastNotified: { [reminderId: string]: number } = {};
-// Track whether user is currently inside reminder radius
-const currentlyInside: { [reminderId: string]: boolean } = {};
-
-// Configurable notification interval - can be changed to any value
-const TWO_MINUTES = 2 * 60 * 1000;
-const THIRTY_MINUTES = 30 * 60 * 1000; // 30 minutes in milliseconds
 
 function getDistance(lat1: number, lon1: number, lat2: number, lon2: number) {
   const R = 6371e3; // meters
@@ -46,7 +40,7 @@ export default function HomeScreen() {
 
   useEffect(() => {
     startLocationTracking();
-
+    
     // Clean up the subscription when component unmounts
     return () => {
       if (locationSubscription.current) {
@@ -56,16 +50,16 @@ export default function HomeScreen() {
   }, []);
 
   useEffect(() => {
+    const FIVE_MINUTES = 5 * 60 * 1000;
+    const TEN_SECONDS = 10 * 1000;
     const interval = setInterval(async () => {
       if (!location) return;
       const allReminders = await getAllReminders();
       const now = Date.now();
-
+      
       for (const reminder of allReminders || []) {
-        // Skip completed reminders
         if (!reminder || reminder.completed) {
           delete lastNotified[reminder?.id];
-          delete currentlyInside[reminder?.id];
           continue;
         }
 
@@ -78,19 +72,17 @@ export default function HomeScreen() {
           reminder.longitude
         );
 
-        // Check if user is within radius and time window
-        const isInside =
-          dist < 50 &&
+        if (
           now >= start.getTime() &&
-          now <= end.getTime();
-
-        // Case 1: User just entered the radius
-        if (isInside && !currentlyInside[reminder.id]) {
-          // User wasn't inside before, but is now - they've entered the radius
-          currentlyInside[reminder.id] = true;
-
-          // Check if we should send a notification (enough time has passed)
-          if (!lastNotified[reminder.id] || now - lastNotified[reminder.id] >= TWO_MINUTES) {
+          now <= end.getTime() &&
+          // dist < 100
+          dist < 50
+        ) {
+          if (
+            !lastNotified[reminder.id] ||
+            // now - lastNotified[reminder.id] >= FIVE_MINUTES
+            now - lastNotified[reminder.id] >= TEN_SECONDS
+          ) {
             try {
               await Notifications.scheduleNotificationAsync({
                 content: {
@@ -100,21 +92,15 @@ export default function HomeScreen() {
                 trigger: null,
               });
               lastNotified[reminder.id] = now;
-              console.log(`Notification sent for ${reminder.title} - entered radius`);
             } catch (e) {
               console.log('Notification error:', e);
             }
           }
+        } else {
+          delete lastNotified[reminder.id];
         }
-        // Case 2: User just left the radius
-        else if (!isInside && currentlyInside[reminder.id]) {
-          // User was inside before, but isn't now - they've left the radius
-          currentlyInside[reminder.id] = false;
-          console.log(`User left radius for ${reminder.title}`);
-        }
-        // Otherwise, user's status relative to this reminder hasn't changed
       }
-    }, 10000); // Check every 10 seconds
+    }, 10000);
 
     return () => clearInterval(interval);
   }, [location]);
@@ -147,13 +133,13 @@ export default function HomeScreen() {
       accuracy: Location.Accuracy.Balanced
     });
     setLocation(initialPosition.coords);
-
+    
     // Then start watching for position updates
     locationSubscription.current = await Location.watchPositionAsync(
       {
         accuracy: Location.Accuracy.Balanced,
-        timeInterval: 5000, // Update every 5 seconds
-        distanceInterval: 5, // Update every 5 meters
+        timeInterval: 5000,    // Update every 5 seconds
+        distanceInterval: 5,   // Update every 5 meters
       },
       (newLocation) => {
         console.log('Location updated:', newLocation.coords);

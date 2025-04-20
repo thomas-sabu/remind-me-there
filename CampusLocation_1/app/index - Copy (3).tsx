@@ -1,21 +1,16 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { View, Button, StyleSheet, Text } from 'react-native';
-import ReminderList from '../components/ReminderList';
+import ReminderList from '../components/ReminderList'; // Adjust path if needed
 import MapView, { Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import { useRouter, useFocusEffect } from 'expo-router';
-import { getAllReminders, deleteReminder, markReminderComplete, markReminderIncomplete } from '../utils/storage';
+import { getAllReminders, deleteReminder, markReminderComplete, markReminderIncomplete, saveReminder } from '../utils/storage';
+
 import { getAllLocationPins } from '../utils/locations';
 
-// Place these outside the component so they persist
+// Place this outside the component so it persists
 const lastNotified: { [reminderId: string]: number } = {};
-// Track whether user is currently inside reminder radius
-const currentlyInside: { [reminderId: string]: boolean } = {};
-
-// Configurable notification interval - can be changed to any value
-const TWO_MINUTES = 2 * 60 * 1000;
-const THIRTY_MINUTES = 30 * 60 * 1000; // 30 minutes in milliseconds
 
 function getDistance(lat1: number, lon1: number, lat2: number, lon2: number) {
   const R = 6371e3; // meters
@@ -35,7 +30,6 @@ export default function HomeScreen() {
   const [location, setLocation] = useState(null);
   const [pins, setPins] = useState([]);
   const router = useRouter();
-  const locationSubscription = useRef(null);
 
   useFocusEffect(
     useCallback(() => {
@@ -45,27 +39,20 @@ export default function HomeScreen() {
   );
 
   useEffect(() => {
-    startLocationTracking();
-
-    // Clean up the subscription when component unmounts
-    return () => {
-      if (locationSubscription.current) {
-        locationSubscription.current.remove();
-      }
-    };
+    getCurrentLocation();
   }, []);
 
   useEffect(() => {
+    const FIVE_MINUTES = 5 * 60 * 1000;
+    const TEN_SECONDS = 10 * 1000;
     const interval = setInterval(async () => {
       if (!location) return;
       const allReminders = await getAllReminders();
       const now = Date.now();
 
       for (const reminder of allReminders || []) {
-        // Skip completed reminders
         if (!reminder || reminder.completed) {
           delete lastNotified[reminder?.id];
-          delete currentlyInside[reminder?.id];
           continue;
         }
 
@@ -78,19 +65,17 @@ export default function HomeScreen() {
           reminder.longitude
         );
 
-        // Check if user is within radius and time window
-        const isInside =
-          dist < 50 &&
+        if (
           now >= start.getTime() &&
-          now <= end.getTime();
-
-        // Case 1: User just entered the radius
-        if (isInside && !currentlyInside[reminder.id]) {
-          // User wasn't inside before, but is now - they've entered the radius
-          currentlyInside[reminder.id] = true;
-
-          // Check if we should send a notification (enough time has passed)
-          if (!lastNotified[reminder.id] || now - lastNotified[reminder.id] >= TWO_MINUTES) {
+          now <= end.getTime() &&
+          // dist < 100
+          dist < 50
+        ) {
+          if (
+            !lastNotified[reminder.id] ||
+            now - lastNotified[reminder.id] >= FIVE_MINUTES
+            // now - lastNotified[reminder.id] >= TEN_SECONDS
+          ) {
             try {
               await Notifications.scheduleNotificationAsync({
                 content: {
@@ -100,34 +85,22 @@ export default function HomeScreen() {
                 trigger: null,
               });
               lastNotified[reminder.id] = now;
-              console.log(`Notification sent for ${reminder.title} - entered radius`);
             } catch (e) {
               console.log('Notification error:', e);
             }
           }
+        } else {
+          delete lastNotified[reminder.id];
         }
-        // Case 2: User just left the radius
-        else if (!isInside && currentlyInside[reminder.id]) {
-          // User was inside before, but isn't now - they've left the radius
-          currentlyInside[reminder.id] = false;
-          console.log(`User left radius for ${reminder.title}`);
-        }
-        // Otherwise, user's status relative to this reminder hasn't changed
       }
-    }, 10000); // Check every 10 seconds
+    }, 30000);
 
     return () => clearInterval(interval);
   }, [location]);
 
   const loadReminders = async () => {
     const data = await getAllReminders();
-    // Sort with incomplete first, then completed
-    const validReminders = Array.isArray(data) ? data.filter(Boolean) : [];
-    const sortedReminders = [
-      ...validReminders.filter(r => !r.completed),
-      ...validReminders.filter(r => r.completed)
-    ];
-    setReminders(sortedReminders);
+    setReminders(Array.isArray(data) ? data : []);
   };
 
   const loadPins = async () => {
@@ -135,31 +108,11 @@ export default function HomeScreen() {
     setPins(Array.isArray(pins) ? pins : []);
   };
 
-  const startLocationTracking = async () => {
+  const getCurrentLocation = async () => {
     let { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== 'granted') {
-      console.log('Permission to access location was denied');
-      return;
-    }
-
-    // First get the current position immediately
-    let initialPosition = await Location.getCurrentPositionAsync({
-      accuracy: Location.Accuracy.Balanced
-    });
-    setLocation(initialPosition.coords);
-
-    // Then start watching for position updates
-    locationSubscription.current = await Location.watchPositionAsync(
-      {
-        accuracy: Location.Accuracy.Balanced,
-        timeInterval: 5000, // Update every 5 seconds
-        distanceInterval: 5, // Update every 5 meters
-      },
-      (newLocation) => {
-        console.log('Location updated:', newLocation.coords);
-        setLocation(newLocation.coords);
-      }
-    );
+    if (status !== 'granted') return;
+    let loc = await Location.getCurrentPositionAsync({});
+    setLocation(loc.coords);
   };
 
   const handleDelete = async (id: string) => {
@@ -169,15 +122,37 @@ export default function HomeScreen() {
 
   const handleComplete = async (id: string) => {
     await markReminderComplete(id);
-    // Reload from storage to ensure persistence
-    loadReminders();
+    setReminders(reminders =>
+      reminders
+        .map(r => (r && r.id === id ? { ...r, completed: true } : r))
+        .sort((a, b) => {
+          if (!a || !b) return 0;
+          if (a.completed === b.completed) return 0;
+          return a.completed ? 1 : -1;
+        })
+    );
   };
 
+  // New function to mark reminder as incomplete
   const handleIncomplete = async (id: string) => {
     await markReminderIncomplete(id);
-    // Reload from storage to ensure persistence
-    loadReminders();
+    setReminders(reminders =>
+      reminders
+        .map(r => (r && r.id === id ? { ...r, completed: false } : r))
+        .sort((a, b) => {
+          if (!a || !b) return 0;
+          if (a.completed === b.completed) return 0;
+          return a.completed ? 1 : -1;
+        })
+    );
   };
+
+
+  // Sort reminders: incomplete first, then completed
+  const sortedReminders = [
+    ...reminders.filter(r => r && !r.completed),
+    ...reminders.filter(r => r && r.completed),
+  ];
 
   return (
     <View style={styles.container}>
@@ -187,12 +162,6 @@ export default function HomeScreen() {
         <MapView
           style={styles.map}
           initialRegion={{
-            latitude: location.latitude,
-            longitude: location.longitude,
-            latitudeDelta: 0.01,
-            longitudeDelta: 0.01,
-          }}
-          region={{
             latitude: location.latitude,
             longitude: location.longitude,
             latitudeDelta: 0.01,
@@ -239,7 +208,7 @@ export default function HomeScreen() {
       )}
 
       <ReminderList
-        reminders={reminders}
+        reminders={sortedReminders}
         onDelete={handleDelete}
         onComplete={handleComplete}
         onIncomplete={handleIncomplete}
